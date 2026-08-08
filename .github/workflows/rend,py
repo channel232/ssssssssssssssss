@@ -1,0 +1,213 @@
+import os, random, subprocess, threading, time, traceback, sys
+from pathlib import Path
+import gdown
+
+def main():
+    TMP               = Path("/tmp/mjx9render")
+    IMAGES_FOLDER     = "1sXwstU6lFL2G6msCSYife8GFt_YEmwN4"
+    SONGS_FOLDER      = "1KJRX_fSFyyRHhW_Lh846o9POxcrGgqL4"
+
+    DURATION          = random.randint(3600, 10800)  # 1hr - 3hr
+
+    AUDIO_BITRATE_K   = 128
+    FPS               = 1
+    MIN_SIZE_BYTES    = int(1.0 * 1024 * 1024 * 1024)
+    MAX_SIZE_BYTES    = int(1.9 * 1024 * 1024 * 1024)
+    TARGET_SIZE_BYTES = int(1.85 * 1024 * 1024 * 1024)
+
+    TARGET_IMAGE_NAME = os.environ.get("TARGET_IMAGE_NAME")
+    if not TARGET_IMAGE_NAME:
+        print("ERROR: TARGET_IMAGE_NAME env var not set.")
+        sys.exit(1)
+
+    TMP.mkdir(exist_ok=True)
+    (TMP / "images").mkdir(exist_ok=True)
+    (TMP / "songs").mkdir(exist_ok=True)
+
+    images_dir = TMP / "images"
+    songs_dir  = TMP / "songs"
+
+    def download_with_timeout(fn, timeout_sec=1800, label="download"):
+        result = [None]; error = [None]
+        def worker():
+            try: result[0] = fn()
+            except Exception as e: error[0] = e
+        t = threading.Thread(target=worker, daemon=True)
+        t.start(); t.join(timeout_sec)
+        if t.is_alive(): raise TimeoutError(f"{label} timed out after {timeout_sec}s")
+        if error[0]: raise error[0]
+        return result[0]
+
+    stat = os.statvfs(str(TMP))
+    free_gb = (stat.f_bavail * stat.f_frsize) / (1024 ** 3)
+    print(f"[DISK] Free space: {free_gb:.1f} GB")
+    if free_gb < 4.0:
+        print(f"ERROR: Not enough free space ({free_gb:.1f} GB).")
+        sys.exit(1)
+
+    print("Fetching images...")
+    try:
+        download_with_timeout(
+            lambda: gdown.download_folder(id=IMAGES_FOLDER, output=str(images_dir), quiet=False, use_cookies=False),
+            timeout_sec=900, label="images"
+        )
+    except Exception as e:
+        print(f"ERROR: images download failed: {e}")
+        traceback.print_exc()
+        sys.exit(1)
+
+    print("Fetching songs...")
+    try:
+        download_with_timeout(
+            lambda: gdown.download_folder(id=SONGS_FOLDER, output=str(songs_dir), quiet=False, use_cookies=False),
+            timeout_sec=900, label="songs"
+        )
+    except Exception as e:
+        print(f"ERROR: songs download failed: {e}")
+        traceback.print_exc()
+        sys.exit(1)
+
+    matches = list(images_dir.rglob(TARGET_IMAGE_NAME))
+    if not matches:
+        print(f"ERROR: Target '{TARGET_IMAGE_NAME}' not found.")
+        print("Files actually present in images_dir:")
+        for p in images_dir.rglob("*"):
+            print(f"  {p}")
+        sys.exit(1)
+    image_path = matches[0]
+    print(f"\n>>> FILE    : {image_path.name}")
+    print(f">>> DURATION: {DURATION}s ({DURATION//3600}h {(DURATION%3600)//60}m)\n")
+
+    song_files = (
+        list(songs_dir.glob("*.mp3")) +
+        list(songs_dir.glob("*.wav")) +
+        list(songs_dir.glob("*.m4a"))
+    )
+    if not song_files:
+        print("ERROR: No song files found.")
+        print("Files actually present in songs_dir:")
+        for p in songs_dir.rglob("*"):
+            print(f"  {p}")
+        sys.exit(1)
+    random.shuffle(song_files)
+    print("Playback order:")
+    for i, s in enumerate(song_files):
+        print(f"  {i+1}. {s.name}")
+
+    concat_path = TMP / f"clist_{image_path.stem}.txt"
+    estimated_len = 200
+    repeats = max(1, (DURATION // (len(song_files) * estimated_len)) + 2)
+    with open(concat_path, "w") as f:
+        for _ in range(repeats):
+            batch = song_files[:]
+            random.shuffle(batch)
+            for s in batch:
+                f.write(f"file '{s}'\n")
+
+    output_path = TMP / f"OUT_{image_path.stem}.mp4"
+
+    stat = os.statvfs(str(TMP))
+    free_gb = (stat.f_bavail * stat.f_frsize) / (1024 ** 3)
+    print(f"[DISK] Free after fetch: {free_gb:.1f} GB")
+    if free_gb < 2.0:
+        print(f"ERROR: Not enough space ({free_gb:.1f} GB free).")
+        sys.exit(1)
+
+    target_total_kbits = (TARGET_SIZE_BYTES * 8) / 1000
+    target_audio_kbits = AUDIO_BITRATE_K * DURATION
+    target_video_kbits = target_total_kbits - target_audio_kbits
+    video_bitrate_k = int(target_video_kbits / DURATION)
+
+    video_bitrate_k = max(300, min(video_bitrate_k, 4000))
+    maxrate_k = int(video_bitrate_k * 1.5)
+    bufsize_k = int(video_bitrate_k * 2)
+
+    print(f"[BITRATE] video={video_bitrate_k}k maxrate={maxrate_k}k bufsize={bufsize_k}k audio={AUDIO_BITRATE_K}k")
+
+    filter_complex = (
+        f"[0:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
+        f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,format=yuv420p[outv]"
+    )
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-framerate", str(FPS), "-i", str(image_path),
+        "-f", "concat", "-safe", "0", "-i", str(concat_path),
+        "-t", str(DURATION),
+        "-filter_complex", filter_complex,
+        "-map", "[outv]", "-map", "1:a",
+        "-c:v", "libx264", "-preset", "medium", "-tune", "stillimage",
+        "-b:v", f"{video_bitrate_k}k", "-maxrate", f"{maxrate_k}k", "-bufsize", f"{bufsize_k}k",
+        "-r", str(FPS), "-g", str(FPS * 2),
+        "-c:a", "aac", "-b:a", f"{AUDIO_BITRATE_K}k", "-ar", "44100",
+        "-movflags", "+faststart", str(output_path),
+    ]
+
+    print("\nRunning FFmpeg...")
+    print("Command:", " ".join(cmd))
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    stopped_by_watcher = False
+    under_minimum = False
+
+    def size_watcher():
+        nonlocal stopped_by_watcher
+        while proc.poll() is None:
+            time.sleep(15)
+            if output_path.exists():
+                size = output_path.stat().st_size
+                mb = size / (1024 * 1024)
+                gb = size / (1024 * 1024 * 1024)
+                print(f"[SIZE] {mb:.1f} MB ({gb:.3f} GB)", flush=True)
+                if size >= MAX_SIZE_BYTES:
+                    print("[SIZE] Cap reached — stopping.", flush=True)
+                    stopped_by_watcher = True
+                    proc.terminate()
+                    break
+
+    watcher = threading.Thread(target=size_watcher, daemon=True)
+    watcher.start()
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+    proc.wait()
+    watcher.join()
+
+    if not stopped_by_watcher and proc.returncode != 0:
+        print(f"ERROR: FFmpeg failed with return code {proc.returncode}")
+        sys.exit(1)
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        print("ERROR: No output produced.")
+        sys.exit(1)
+
+    final_size    = output_path.stat().st_size
+    final_size_mb = final_size / (1024 * 1024)
+    final_size_gb = final_size / (1024 * 1024 * 1024)
+
+    if final_size < MIN_SIZE_BYTES:
+        print(f"[SIZE] Note: under 1 GB ({final_size_gb:.3f} GB).")
+        under_minimum = True
+
+    stop_reason = "cap reached" if stopped_by_watcher else "duration reached"
+    print(f"\nDONE — {output_path}")
+    print(f"Stop   : {stop_reason}")
+    print(f"Size   : {final_size_mb:.1f} MB ({final_size_gb:.3f} GB)")
+    print(f"Under 1.9GB cap : {'yes' if final_size <= MAX_SIZE_BYTES else 'NO - CHECK'}")
+
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if github_output:
+        with open(github_output, "a") as f:
+            f.write(f"output_path={output_path}\n")
+            f.write(f"image_name={image_path.name}\n")
+            f.write(f"duration_seconds={DURATION}\n")
+            f.write(f"final_size_mb={final_size_mb:.1f}\n")
+            f.write(f"under_minimum={str(under_minimum).lower()}\n")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        print("UNCAUGHT EXCEPTION:")
+        traceback.print_exc()
+        sys.exit(1)
