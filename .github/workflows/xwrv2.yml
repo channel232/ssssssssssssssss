@@ -72,7 +72,7 @@ jobs:
           ls -la
           echo "---"
           if [ ! -f rend.py ]; then
-            echo "ERROR: rend.py not found in repo root."
+            echo "ERROR: rend.py not found in repo root. Check that it was committed at the top level, not inside .github/workflows."
             exit 1
           fi
       - name: Run
