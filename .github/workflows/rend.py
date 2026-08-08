@@ -27,16 +27,28 @@ def main():
     images_dir = TMP / "images"
     songs_dir  = TMP / "songs"
 
-    def download_with_timeout(fn, timeout_sec=1800, label="download"):
-        result = [None]; error = [None]
-        def worker():
-            try: result[0] = fn()
-            except Exception as e: error[0] = e
-        t = threading.Thread(target=worker, daemon=True)
-        t.start(); t.join(timeout_sec)
-        if t.is_alive(): raise TimeoutError(f"{label} timed out after {timeout_sec}s")
-        if error[0]: raise error[0]
-        return result[0]
+    def download_folder_with_retry(folder_id, output_dir, label, attempts=3, timeout_sec=900):
+        for attempt in range(1, attempts + 1):
+            print(f"[{label}] attempt {attempt}/{attempts}...")
+            result = [None]; error = [None]
+            def worker():
+                try:
+                    result[0] = gdown.download_folder(id=folder_id, output=str(output_dir), quiet=False, use_cookies=False)
+                except Exception as e:
+                    error[0] = e
+            t = threading.Thread(target=worker, daemon=True)
+            t.start(); t.join(timeout_sec)
+            if t.is_alive():
+                print(f"[{label}] attempt {attempt} timed out after {timeout_sec}s")
+            elif error[0] is None:
+                print(f"[{label}] succeeded on attempt {attempt}")
+                return
+            else:
+                print(f"[{label}] attempt {attempt} failed: {error[0]}")
+            if attempt < attempts:
+                time.sleep(20)
+        print(f"ERROR: [{label}] all {attempts} attempts failed.")
+        sys.exit(1)
 
     stat = os.statvfs(str(TMP))
     free_gb = (stat.f_bavail * stat.f_frsize) / (1024 ** 3)
@@ -46,26 +58,10 @@ def main():
         sys.exit(1)
 
     print("Fetching images...")
-    try:
-        download_with_timeout(
-            lambda: gdown.download_folder(id=IMAGES_FOLDER, output=str(images_dir), quiet=False, use_cookies=False),
-            timeout_sec=900, label="images"
-        )
-    except Exception as e:
-        print(f"ERROR: images download failed: {e}")
-        traceback.print_exc()
-        sys.exit(1)
+    download_folder_with_retry(IMAGES_FOLDER, images_dir, "images")
 
     print("Fetching songs...")
-    try:
-        download_with_timeout(
-            lambda: gdown.download_folder(id=SONGS_FOLDER, output=str(songs_dir), quiet=False, use_cookies=False),
-            timeout_sec=900, label="songs"
-        )
-    except Exception as e:
-        print(f"ERROR: songs download failed: {e}")
-        traceback.print_exc()
-        sys.exit(1)
+    download_folder_with_retry(SONGS_FOLDER, songs_dir, "songs")
 
     matches = list(images_dir.rglob(TARGET_IMAGE_NAME))
     if not matches:
