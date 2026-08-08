@@ -71,15 +71,15 @@ jobs:
           echo "Repo root contents:"
           ls -la
           echo "---"
-          if [ ! -f rend.py ]; then
-            echo "ERROR: rend.py not found in repo root. Check that it was committed at the top level, not inside .github/workflows."
+          if [ ! -f render.py ]; then
+            echo "ERROR: render.py not found in repo root. Check that it was committed at the top level, not inside .github/workflows."
             exit 1
           fi
       - name: Run
         id: render
         env:
           TARGET_IMAGE_NAME: ${{ matrix.image_name }}
-        run: python3 rend.py
+        run: python3 render.py
       - name: Warn if small
         if: steps.render.outputs.under_minimum == 'true'
         run: |
